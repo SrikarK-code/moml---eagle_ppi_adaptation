@@ -1,0 +1,116 @@
+modify v0_wclip.ipynb
+
+don't reduce the latent down to  64, keep the 1280 esm latent space 
+--> in that way CLIP module can also be trained and used 
+
+The loss for training the CLIP is symmetrical
+categorical cross-entropy loss between the corresponding antigen and antibody vectors representations
+in the batch
+
+decoder will just be a ESM head. 
+
+have ab<>ag and ag<>ag transformers AND and cross attn of noised latent (full esm) to protein
+
+but the way you can do this is with a 3-4 blocks of:
+- esm self attn of ag<>ag (full protein target)
+- esm self attn of ab<>ab (full peptide binder)
+- cross attn of ab<>epitope (attend ab to epitope)
+- cross attn of epitope<>ab (cross attend epitope to ab)
+
+# self attn
+ ## esm layers
+        # # Convert latent representations to token probabilities
+        # token_probs = self.to_tokens(x).softmax(dim=-1)
+        # # Use argmax to get token IDs (you might want to use sampling for more diversity)
+        # token_ids = token_probs.argmax(dim=-1)
+        # Apply ESM attention layers
+        for esm_layer in self.esm_attention_layers:
+            # Create attention mask (
+            attention_mask = torch.ones(x.shape[0], x.shape[1], dtype=torch.bool, device=x.device)
+
+            # Extract only the self-attention part of the ESM layer
+            self_attn = esm_layer.self_attn
+
+            # Transpose x to match ESM's expected format: (seq_length, batch_size, embed_dim)
+            x = x.transpose(0, 1)
+
+            # Apply self-attention
+            residual = x
+            x = esm_layer.self_attn_layer_norm(x)
+            x, _ = esm_layer.self_attn(
+                query=x,
+                key=x,
+                value=x,
+                key_padding_mask=~attention_mask,
+                need_weights=False
+            )
+            x = residual + x
+
+            # Apply feed-forward network
+            residual = x
+            x = esm_layer.final_layer_norm(x)
+            x = esm_layer.fc1(x)
+            x = F.gelu(x)
+            x = esm_layer.fc2(x)
+            x = residual + x
+
+            # Transpose x back to (batch_size, seq_length, embed_dim)
+            x = x.transpose(0, 1)
+
+
+## cross attn
+
+import torch
+import torch.nn.functional as F
+
+class CrossAttentionModule(torch.nn.Module):
+    def __init__(self, esm_layers, embed_dim):
+        super().__init__()
+        self.esm_attention_layers = esm_layers
+        self.embed_dim = embed_dim
+
+    def forward(self, ab_latent, epitope_latent):
+        # Transpose to match ESM's expected format: (seq_length, batch_size, embed_dim)
+        ab_latent = ab_latent.transpose(0, 1)
+        epitope_latent = epitope_latent.transpose(0, 1)
+
+        for esm_layer in self.esm_attention_layers:
+            # Cross-attention of ab to epitope
+            ab_residual = ab_latent
+            ab_latent = esm_layer.self_attn_layer_norm(ab_latent)
+            ab_latent, _ = esm_layer.self_attn(
+                query=ab_latent,
+                key=epitope_latent,
+                value=epitope_latent,
+                need_weights=False
+            )
+            ab_latent = ab_residual + ab_latent
+
+            # Cross-attention of epitope to ab
+            epitope_residual = epitope_latent
+            epitope_latent = esm_layer.self_attn_layer_norm(epitope_latent)
+            epitope_latent, _ = esm_layer.self_attn(
+                query=epitope_latent,
+                key=ab_latent,
+                value=ab_latent,
+                need_weights=False
+            )
+            epitope_latent = epitope_residual + epitope_latent
+
+            # Apply feed-forward networks
+            ab_latent = self._apply_feed_forward(esm_layer, ab_latent)
+            epitope_latent = self._apply_feed_forward(esm_layer, epitope_latent)
+
+        # Transpose back to (batch_size, seq_length, embed_dim)
+        ab_latent = ab_latent.transpose(0, 1)
+        epitope_latent = epitope_latent.transpose(0, 1)
+        return ab_latent, epitope_latent
+
+    def _apply_feed_forward(self, esm_layer, x):
+        residual = x
+        x = esm_layer.final_layer_norm(x)
+        x = esm_layer.fc1(x)
+        x = F.gelu(x)
+        x = esm_layer.fc2(x)
+        x = residual + x
+        return x
