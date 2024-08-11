@@ -1,0 +1,17 @@
+but the way you can do this is with a 3-4 blocks of:
+- esm self attn of ag<>ag (full protein target)
+- esm self attn of ab<>ab (full peptide binder)
+- cross attn of ab<>epitope (attend ab to epitope)
+- cross attn of epitope<>ab (cross attend epitope to ab)
+
+
+> instead of that:
+self attn similar to ESM layers of:
+- scvi
+- pseudotime
+- scvi + pseudotime combined
+
+cross_attn
+- scvi<>protein
+- pseudotime<>protein
+- scvi + pseudotime combined <> protein
