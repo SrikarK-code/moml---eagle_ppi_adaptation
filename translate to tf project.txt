@@ -15,3 +15,97 @@ cross_attn
 - scvi<>protein
 - pseudotime<>protein
 - scvi + pseudotime combined <> protein
+
+
+
+
+what we have already:
+-----------------------
+Self-attention of scVI: Yes
+Self-attention of pseudotime: No
+Self-attention of scVI+pseudotime combined: No
+Cross-attention scVI<>protein: Yes
+Cross-attention pseudotime<>protein: No
+Cross-attention (scVI + pseudotime combined)<>protein: Partially
+
+
+how? 
+Self-attention:
+UNet model includes AttentionBlock1D and SpatialTransformer1D components, which implement self-attention mechanisms. These are analogous to the ESM self-attention layers you described.
+Cross-attention:
+The SpatialTransformer1D module in your UNet includes cross-attention functionality. Specifically, the BasicTransformerBlock within SpatialTransformer1D has two attention mechanisms:
+
+self.attn1: Self-attention
+self.attn2: Cross-attention (can attend to a separate context)
+
+
+
+
+
+how to modify to get desired output:
+
+In the CustomUNet1D class, modify the __init__ method:
+
+def __init__(self, ..., pseudotime_dim=1):
+    # ... (existing initialization)
+    self.scvi_pseudotime_combiner = nn.Linear(in_channels + pseudotime_dim, in_channels)
+    # ... (rest of initialization)
+
+Modify the forward method of CustomUNet1D:
+
+def forward(self, x, timesteps, context, pseudotime):
+    # x: [batch_size, 1024, 50] (scVI embeddings)
+    # context: [batch_size, seq_len, context_dim] (protein embeddings)
+    # pseudotime: [batch_size, 1024, 1]
+
+    # Combine scVI and pseudotime
+    combined = torch.cat([x, pseudotime], dim=-1)
+    combined = self.scvi_pseudotime_combiner(combined)
+
+    # Self-attention on scVI
+    h_scvi = self.scvi_self_attn(x)
+    
+    # Self-attention on pseudotime
+    h_pseudo = self.pseudo_self_attn(pseudotime)
+    
+    # Self-attention on combined
+    h_combined = self.combined_self_attn(combined)
+
+    # ... (rest of the forward method)
+
+    for module in self.input_blocks:
+        if isinstance(module, SpatialTransformer1D):
+            h = module(h, context, x, pseudotime, combined)
+        else:
+            h = module(h)
+
+    # ... (rest of the method remains the same)
+
+Modify the SpatialTransformer1D class:
+
+class SpatialTransformer1D(nn.Module):
+    def __init__(self, ..., extra_cross_attention=True):
+        # ... (existing initialization)
+        if extra_cross_attention:
+            self.cross_attn_scvi = CrossAttention(...)
+            self.cross_attn_pseudo = CrossAttention(...)
+            self.cross_attn_combined = CrossAttention(...)
+
+    def forward(self, x, context, scvi, pseudotime, combined):
+        # ... (existing code)
+
+        for block in self.transformer_blocks:
+            x = block(x, context)
+        
+        if hasattr(self, 'cross_attn_scvi'):
+            x = self.cross_attn_scvi(x, scvi) + x
+            x = self.cross_attn_pseudo(x, pseudotime) + x
+            x = self.cross_attn_combined(x, combined) + x
+
+        # ... (rest of the method)
+
+Add new self-attention modules in CustomUNet1D:
+
+self.scvi_self_attn = AttentionBlock1D(in_channels)
+self.pseudo_self_attn = AttentionBlock1D(pseudotime_dim)
+self.combined_self_attn = AttentionBlock1D(in_channels)
